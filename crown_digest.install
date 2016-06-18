@@ -1,0 +1,26 @@
+<?php
+
+
+/**
+ * Implements hook_install().
+ */
+function crown_digest_install() {
+
+  variable_set('crown_digest_last_time', 0);
+  variable_set('crown_digest_active', 0);
+  variable_set('crown_digest_users', array());
+  variable_set('crown_digest_nodes_list', '');
+} 
+
+/**
+ * Implements hook_uninstall().
+ */
+function crown_digest_uninstall() {
+
+  variable_del('crown_digest_last_time');
+  variable_del('crown_digest_active');
+  variable_del('crown_digest_users');
+  variable_del('crown_digest_nodes_list');
+}
+
+

@@ -1,0 +1,319 @@
+<?php
+
+/**
+ * Implements hook_menu().
+ */
+function crown_digest_menu() {
+  $items = array();
+
+ $items['admin/config/crown'] = array(
+    'title' => 'Crown custom modules',
+    'position' => 'left',
+    'weight' => -100,
+    'page callback' => 'system_admin_menu_block_page',
+    'access arguments' => array('administer site configuration'),
+    'file' => 'system.admin.inc',
+    'file path' => drupal_get_path('module', 'system'),
+  );
+ 
+  $items['admin/config/crown/crown_digest'] = array(
+    'title' => 'Crown digest setting',
+    'description' => 'Crown digest',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('crown_digest_config'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'crown_digest.admin.inc', 
+  );
+  
+  return $items; 
+}
+
+/**
+ * hook_cron_queue_info()
+ */
+function crown_digest_cron_queue_info() {
+  $queues['crown_digest'] = array(
+    'worker callback' => 'crown_digest_check', 
+    'time' => 30,
+    'skip on cron' => true,
+  );
+  return $queues;
+}
+
+
+function crown_digest_check() {
+
+  drupal_set_message("Cron run digest");
+
+  if (variable_get('crown_digest_active', 0) != 1) {
+
+    drupal_set_message("Cron check new nodes");
+
+    $content_types =drupal_map_assoc(variable_get('crown_digest_content_types', array()));
+
+    $nodes = db_select('node', 'n');
+    $nodes->fields('n', array('nid', 'title','created','type'));
+    $nodes->condition('n.type', $content_types, 'IN');
+    $nodes->condition('n.created', variable_get('crown_digest_last_time', 0), '>');
+    $nodes = $nodes->execute()->fetchAll(); 
+          
+
+    drupal_set_message("Count new nodes = " . count($nodes) .", date = ".variable_get('crown_digest_last_time', 0));
+
+    //var_dump($nodes);
+
+    if (count($nodes) > variable_get('crown_digest_submission_count', '10')) {   
+
+        drupal_set_message("Prepare nodes and users for digest");    
+
+        $query = 'SELECT DISTINCT(ur.uid) 
+        FROM {users_roles} AS ur
+        WHERE ur.rid IN (:rids)';
+        $result = db_query($query, array(':rids' => variable_get('crown_digest_roles', array())));
+        $uids = $result->fetchCol();
+        // $uids[uid]->user object
+
+        drupal_set_message("Count users = " . count($uids));
+
+        $loan_types = drupal_map_assoc(variable_get('crown_digest_loan_types', array()));
+        // for this terms mail inform active
+
+        $filtered_nodes = array();
+
+        // $nodes[key]->nid,->title,->type,->created
+        foreach ($nodes as $key => $node) {
+
+          $query = db_select('taxonomy_index', 'tx');
+          $query->innerJoin('taxonomy_term_data', 'ttd', 'tx.tid = ttd.tid');
+          $query->fields('ttd', array('tid'));
+          $query->fields('ttd', array('name'));
+          $query->condition('ttd.vid', 3);
+          $query->condition('tx.nid', $node->nid);
+          $terms = $query->execute()->fetchAll();
+
+          foreach ($terms as $term) {
+            if (isset($loan_types[$term->tid])) {
+
+              $node_obj = node_load($node->nid);
+              $filtered_nodes[$node->nid]['path'] = $GLOBALS['base_url'].'/'. drupal_get_path_alias('node/'. $node->nid);
+              $filtered_nodes[$node->nid]['title'] = $node->title;
+              $filtered_nodes[$node->nid]['terms'][] = $term;
+              $filtered_nodes[$node->nid]['ntype'] = $node->type;
+
+              // get attention level for request
+              if (isset($node_obj->field_attention_level['und'])) {
+                $attention_level_tid = $node_obj->field_attention_level['und'][0]['tid'];
+                $term = taxonomy_term_load($attention_level_tid);
+
+                if (isset($term->field_action_level_image['und'][0])) {
+
+                  $pic = file_create_url($term->field_action_level_image['und'][0]['uri']);
+                  $filtered_nodes[$node->nid]['attention_level'] = '<a target="_blank" href="'.$GLOBALS['base_root'].'/taxonomy/term/'.$attention_level_tid.'"><img width="100" height="100" src="'.$pic.'"></a>';
+                } else {
+                  $filtered_nodes[$node->nid]['attention_level'] = '';
+                }  
+              } else {
+                $filtered_nodes[$node->nid]['attention_level'] = '';
+              } 
+
+              // get user pic
+              if (isset($node_obj->picture)) {
+                $pic = drupal_basename(file_load($node_obj->picture)->uri);
+                $filtered_nodes[$node->nid]['pic'] = '<a target="_blank" href="'.$GLOBALS['base_root'].'/user/'.$node_obj->uid.'"><img width="100" height="100" src="http://crown.com.au/sites/default/files/selfi_clicks/'.$pic.'"></a>';
+              } else {
+                $filtered_nodes[$node->nid]['pic'] = '';
+              }
+
+              // get FIRST NAME
+              if (isset($node_obj->field_your_address_details['und'][0]) && isset($node_obj->field_your_address_details['und'][0]['first_name'])) {
+                $filtered_nodes[$node->nid]['user_name'] = $node_obj->field_your_address_details['und'][0]['first_name'];
+              } else {
+                $filtered_nodes[$node->nid]['user_name'] = '';
+              }
+
+              // get date ago format
+              $filtered_nodes[$node->nid]['date_ago'] = format_date($node_obj->created, 'time ago');
+
+              // get points
+              $filtered_nodes[$node->nid]['access_points'] = $node_obj->userpoints_nodeaccess_points_price;
+
+              // get request type
+              if (isset($node_obj->field_job_title['und'][0]) && isset($node_obj->field_job_title['und'][0]['tid'])) {
+                $field_job_title_tid = $node_obj->field_job_title['und'][0]['tid'];
+                $term = taxonomy_term_load($field_job_title_tid);
+
+                $filtered_nodes[$node->nid]['purpose'] = '<a style="color:#747474;text-decoration:none;" target="_blank" href="'.$GLOBALS['base_root'].'/taxonomy/term/'.$field_job_title_tid.'">'.$term->name.'</a>';
+              }
+
+              // get amount required
+              if (isset($node_obj->field_loan_amount_required['und'][0]) && isset($node_obj->field_loan_amount_required['und'][0]['value'])) {
+                $filtered_nodes[$node->nid]['amount'] = $node_obj->field_loan_amount_required['und'][0]['value'];
+              }
+
+            }
+          }
+        }
+
+        variable_set('crown_digest_users', $uids); // $uids[uid]->user object
+        variable_set('crown_digest_nodes_list', $filtered_nodes);
+        $last_node = count($nodes)-1; //last node key
+        variable_set('crown_digest_last_time',$nodes[$last_node]->created);
+        variable_set('crown_digest_active', 1);
+    }
+  } else {
+
+    drupal_set_message("Cron send mails");
+
+    $users = user_load_multiple(variable_get('crown_digest_users', array()));
+    $nodes_list = variable_get('crown_digest_nodes_list', '');
+    //$filtered_nodes[nid]->title,type,path,term obj (tid,name)
+
+    $total = 0;
+    $nodes_lists = array();
+
+    foreach ($users as $key => $user) {
+
+      $user_profile2 = profile2_load_by_user($user->uid, 'finance_products_offered');
+      if ($user->status == 1 && isset($user_profile2->field_loan_types_offered)  && isset($user_profile2->field_loan_types_offered['und'])) {
+
+        drupal_set_message(print_r("Ok for email ".$user->mail,true));
+
+        $user_loan_tids = array();
+        $nodes_list_for_cur_user = array();
+        $list_for_user_html = '';
+        $list_for_admin_html = '';
+        $user_loan_types = $user_profile2->field_loan_types_offered['und'];
+
+        // $user_loan_types[key]->tid,...
+        //user subscribe to requests with this terms
+        foreach ($user_loan_types as $value) {
+          $user_loan_tids[$value['tid']] = $value['tid'];
+        }
+
+        //var_dump($nodes_list);
+        // if request have user term, include term to mail
+        foreach ($nodes_list as $nid => $node) {
+            foreach ($node['terms'] as $term) {
+              /*if (isset($user_loan_tids[$term->tid])) {*/
+                $nodes_list_for_cur_user[$nid][] = $term;
+              /*}*/
+            }
+        } 
+
+        if (count($nodes_list_for_cur_user) > 0) {    
+          foreach ($nodes_list_for_cur_user as $nid => $node) {
+
+            $attention = $nodes_list[$nid]['attention_level'];
+            $title = $nodes_list[$nid]['title'];
+            $path = $nodes_list[$nid]['path'];
+            $pic  = $nodes_list[$nid]['pic'];
+            $user_name = $nodes_list[$nid]['user_name'];
+            $date_ago = $nodes_list[$nid]['date_ago'];
+            $access_points = $nodes_list[$nid]['access_points'];
+            $purpose = $nodes_list[$nid]['purpose'];
+            $amount = $nodes_list[$nid]['amount'];
+            $title_link = '<a target="_blank" style="color:#747474;text-decoration:none;" href="'.$path.'">'.$title.'</a>';
+
+            $row_template = variable_get('crown_digest_email_body_row', '');
+
+            $row_template = str_replace("[attention]", $attention, $row_template);
+            $row_template = str_replace("[nid]", $nid, $row_template);
+            $row_template = str_replace("[pic]", $pic, $row_template);
+            $row_template = str_replace("[user_name]", $user_name, $row_template);
+            $row_template = str_replace("[date_ago]", $date_ago, $row_template);
+            $row_template = str_replace("[access_points]", $access_points, $row_template);
+            $row_template = str_replace("[purpose]", $purpose, $row_template);
+            $row_template = str_replace("[amount]", $amount, $row_template);
+            $row_template = str_replace("[title_link]", $title_link, $row_template);
+
+
+            $list_for_user_html .= $row_template; 
+          }
+
+          foreach ($nodes_list_for_cur_user as $nid => $node) {
+            $list_for_admin_html .= $nodes_list[$nid]['title'].' - ';
+            foreach ($node as $term) {
+              $list_for_admin_html .= $term->name.', ';
+            }
+            $list_for_admin_html .= ' - '.$nodes_list[$nid]['ntype'].'<br />';
+          }
+
+          $nodes_lists[$user->uid]['list'] = $list_for_admin_html;
+          $nodes_lists[$user->uid]['mail'] = $user->mail;
+
+          $mail_title = variable_get('crown_digest_email_title', '');
+          $mail_body = variable_get('crown_digest_email_body', '');
+          
+          if (isset($user->realname)) {
+            $mail_title = str_replace("[username]", $user->realname, $mail_title);
+            $mail_body = str_replace("[username]", $user->realname, $mail_body);
+          } else {
+            /*$mail_title = str_replase("[username]", $user->field_first_name['und'][0]['value'], $mail_title);
+            $mail_body = str_replace("[username]", $user->field_first_name['und'][0]['value'], $mail_body);*/ 
+          }
+          $mail_title = str_replace("[todays:date]", date("Y-m-d H:i:s"), $mail_title);
+          $mail_body = str_replace("[todays:date]", date("Y-m-d H:i:s"), $mail_body);
+          $mail_body = str_replace("[requests_list]", $list_for_user_html, $mail_body);
+
+          $edit_digest_link = '<a target="_blank" href="'.$GLOBALS['base_url'].'/profile-finance_products_offered/'.$user->uid.'/edit">"Finance Products Offered" </a><br /><br />'; 
+
+          $mail_body = str_replace("[edit_digest_link]", $edit_digest_link, $mail_body);
+
+          if (variable_get('crown_digest_test_is_active', false) && (variable_get('crown_digest_test_email', '') != '')) {
+            $mail_body = 'Submit by '. $user->mail .' <br />'. $mail_body;
+            crown_digest_mail($mail_title, $mail_body, variable_get('crown_digest_test_email', '')); 
+          } else {
+            crown_digest_mail($mail_title, $mail_body, $user->mail);
+          }  
+     
+          $total ++; 
+          if ($total > variable_get('crown_digest_mails_per_cron', 10)){
+            break;
+          }
+        }
+      }
+      unset($users[$key]);
+    }
+
+    if (variable_get('crown_digest_report', false) && (count($nodes_lists) > 0)) {
+      $report_title = 'Email Report for Digest Sent out on Dated ' . date("Y-m-d H:i:s");
+      $report_body = '<h2>Email Report for Digest Sent out on Dated ' . date("Y-m-d H:i:s").'</h2>
+    <p>Digest Recipients Email:<br />  Finance Request - Title *     - field_loan_type_requested  - Content Type</p><br />';
+      foreach ($nodes_lists as $uid => $userq) {
+          $report_body .= $userq['mail'] .':<br />'. $userq['list'] . '<br /><br />';
+      }
+      drupal_set_message("crown_digest_mail");
+      crown_digest_mail($report_title, $report_body, variable_get('crown_digest_test_email', ''));
+    }
+    drupal_set_message("Users count ".count($users));
+
+    if (count($users)>0) {
+      variable_set('crown_digest_users', $users);
+    } else {
+      variable_set('crown_digest_users', array());
+      variable_set('crown_digest_nodes_list', '');
+      variable_set('crown_digest_active', 0);
+    }
+
+  }
+}
+
+function crown_digest_mail($subject, $body, $to) {
+    $message = array(
+      'to' => $to,
+      'subject' => $subject,
+      'body' => $body,
+      'headers' => array(
+        'From' => variable_get('site_mail', 'admin@crown.com.au'),
+        'MIME-Version' => '1.0',
+        'Content-Type' => 'text/html;charset=utf-8',
+      ),
+    );
+    //drupal_set_message($body);
+ 
+    $system = drupal_mail_system('crown_digest', 'mail');
+    if (!$system->mail($message)) {
+      drupal_set_message("FAIl mail to " .$to); 
+    }
+}
+

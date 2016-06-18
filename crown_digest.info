@@ -1,0 +1,5 @@
+name = Crown digest
+description = 
+package = crown
+core = 7.x
+configure = admin/config/crown/crown_digest 
